@@ -41,7 +41,22 @@ func (scp CloseSSHCLient) Close() {
 	scp.sshClient.Close()
 }
 
+type ProgressWriter struct {
+	Writer io.Writer
+	Total  int64
+}
+
+func (pw *ProgressWriter) Write(p []byte) (int, error) {
+	n, err := pw.Writer.Write(p)
+	pw.Total += int64(n)
+	return n, err
+}
+
 type PassThru func(r io.Reader, total int64) io.Reader
+
+type WriterProxyInterface interface {
+	GetIoWriter(io.Writer) io.Writer
+}
 
 type Client struct {
 	// Host the host to connect to.
@@ -106,7 +121,7 @@ func (a *Client) CopyFromFilePassThru(
 	if err != nil {
 		return fmt.Errorf("failed to stat file: %w", err)
 	}
-	return a.CopyPassThru(ctx, &file, remotePath, permissions, stat.Size(), passThru)
+	return a.CopyPassThru(ctx, &file, remotePath, permissions, stat.Size(), passThru, nil)
 }
 
 // CopyFile copies the contents of an io.Reader to a remote location, the length is determined by reading the io.Reader until EOF
@@ -117,7 +132,7 @@ func (a *Client) CopyFile(
 	remotePath string,
 	permissions string,
 ) error {
-	return a.CopyFilePassThru(ctx, fileReader, remotePath, permissions, nil)
+	return a.CopyFilePassThru(ctx, fileReader, remotePath, permissions, nil, nil)
 }
 
 // CopyFilePassThru copies the contents of an io.Reader to a remote location, the length is determined by reading the io.Reader until EOF
@@ -129,6 +144,7 @@ func (a *Client) CopyFilePassThru(
 	remotePath string,
 	permissions string,
 	passThru PassThru,
+	proxyWriter WriterProxyInterface,
 ) error {
 	contentsBytes, err := ioutil.ReadAll(fileReader)
 	if err != nil {
@@ -143,6 +159,7 @@ func (a *Client) CopyFilePassThru(
 		permissions,
 		int64(len(contentsBytes)),
 		passThru,
+		proxyWriter,
 	)
 }
 
@@ -184,7 +201,7 @@ func (a *Client) Copy(
 	permissions string,
 	size int64,
 ) error {
-	return a.CopyPassThru(ctx, r, remotePath, permissions, size, nil)
+	return a.CopyPassThru(ctx, r, remotePath, permissions, size, nil, nil)
 }
 
 // CopyPassThru copies the contents of an io.Reader to a remote location.
@@ -196,6 +213,7 @@ func (a *Client) CopyPassThru(
 	permissions string,
 	size int64,
 	passThru PassThru,
+	proxyWriter WriterProxyInterface,
 ) error {
 	session, err := a.sshClient.NewSession()
 	if err != nil {
@@ -205,11 +223,11 @@ func (a *Client) CopyPassThru(
 
 	stdout, err := session.StdoutPipe()
 	if err != nil {
-		return err
+		return fmt.Errorf("Error getting session.StdoutPipe(): %v", err)
 	}
 	w, err := session.StdinPipe()
 	if err != nil {
-		return err
+		return fmt.Errorf("Error getting session.StdinPipe(): %v", err)
 	}
 	defer w.Close()
 
@@ -223,7 +241,7 @@ func (a *Client) CopyPassThru(
 	// before sending anything through the pipes.
 	err = session.Start(fmt.Sprintf("%s -qt %q", a.RemoteBinary, remotePath))
 	if err != nil {
-		return err
+		return fmt.Errorf("Error Starting upload: %v", err)
 	}
 
 	wg := sync.WaitGroup{}
@@ -239,17 +257,25 @@ func (a *Client) CopyPassThru(
 		_, err = fmt.Fprintln(w, "C"+permissions, size, filename)
 		if err != nil {
 			errCh <- err
+			fmt.Println("Error setting remote filename, size or permissions:", err)
 			return
 		}
 
 		if err = checkResponse(stdout); err != nil {
 			errCh <- err
+			fmt.Println("Error, unexpected response:", err)
 			return
 		}
 
-		_, err = io.Copy(w, r)
+		if proxyWriter == nil {
+			_, err = io.Copy(w, r)
+		} else {
+			proxyW := proxyWriter.GetIoWriter(w)
+			_, err = io.Copy(proxyW, r)
+		}
 		if err != nil {
 			errCh <- err
+			fmt.Println("Unknown Error uploading file:", err)
 			return
 		}
 
