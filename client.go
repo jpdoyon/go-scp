@@ -54,8 +54,9 @@ func (pw *ProgressWriter) Write(p []byte) (int, error) {
 
 type PassThru func(r io.Reader, total int64) io.Reader
 
-type WriterProxyInterface interface {
+type ProxyInterface interface {
 	GetIoWriter(io.Writer) io.Writer
+	GetIoReader(io.Reader) io.Reader
 }
 
 type Client struct {
@@ -138,13 +139,15 @@ func (a *Client) CopyFile(
 // CopyFilePassThru copies the contents of an io.Reader to a remote location, the length is determined by reading the io.Reader until EOF
 // if the file length in know in advance please use "Copy" instead.
 // Access copied bytes by providing a PassThru reader factory.
+// Proxy allows Intercepting the IoWriter as it is written for progress reporting or any other
+// stream modification/monitoring reason and can be set to nil to disable this behaviour.
 func (a *Client) CopyFilePassThru(
 	ctx context.Context,
 	fileReader io.Reader,
 	remotePath string,
 	permissions string,
 	passThru PassThru,
-	proxyWriter WriterProxyInterface,
+	proxy ProxyInterface,
 ) error {
 	contentsBytes, err := ioutil.ReadAll(fileReader)
 	if err != nil {
@@ -159,7 +162,7 @@ func (a *Client) CopyFilePassThru(
 		permissions,
 		int64(len(contentsBytes)),
 		passThru,
-		proxyWriter,
+		proxy,
 	)
 }
 
@@ -206,6 +209,8 @@ func (a *Client) Copy(
 
 // CopyPassThru copies the contents of an io.Reader to a remote location.
 // Access copied bytes by providing a PassThru reader factory
+// Proxy allows Intercepting the IoWriter as it is written for progress reporting or any other
+// stream modification/monitoring reason and can be set to nil to disable this behaviour.
 func (a *Client) CopyPassThru(
 	ctx context.Context,
 	r io.Reader,
@@ -213,7 +218,7 @@ func (a *Client) CopyPassThru(
 	permissions string,
 	size int64,
 	passThru PassThru,
-	proxyWriter WriterProxyInterface,
+	proxy ProxyInterface,
 ) error {
 	session, err := a.sshClient.NewSession()
 	if err != nil {
@@ -267,11 +272,11 @@ func (a *Client) CopyPassThru(
 			return
 		}
 
-		if proxyWriter == nil {
+		if proxy == nil {
 			_, err = io.Copy(w, r)
 		} else {
-			proxyW := proxyWriter.GetIoWriter(w)
-			_, err = io.Copy(proxyW, r)
+			proxy := proxy.GetIoWriter(w)
+			_, err = io.Copy(proxy, r)
 		}
 		if err != nil {
 			errCh <- err
@@ -329,32 +334,38 @@ func (a *Client) CopyPassThru(
 // parameter. Use `CopyFromRemotePassThru` if a more generic writer
 // is desired instead of writing directly to a file on the file system.
 func (a *Client) CopyFromRemote(ctx context.Context, file *os.File, remotePath string) error {
-	return a.CopyFromRemotePassThru(ctx, file, remotePath, nil)
+	return a.CopyFromRemotePassThru(ctx, file, remotePath, nil, nil)
 }
 
 // CopyFromRemotePassThru copies a file from the remote to the given writer. The passThru parameter can be used
 // to keep track of progress and how many bytes that were download from the remote.
 // `passThru` can be set to nil to disable this behaviour.
+// Proxy allows Intercepting the IoReader as it is written for progress reporting or any other
+// stream modification/monitoring reason and can be set to nil to disable this behaviour.
 func (a *Client) CopyFromRemotePassThru(
 	ctx context.Context,
 	w io.Writer,
 	remotePath string,
 	passThru PassThru,
+	proxy ProxyInterface,
 ) error {
-	_, err := a.copyFromRemote(ctx, w, remotePath, passThru, false)
+	_, err := a.copyFromRemote(ctx, w, remotePath, passThru, false, proxy)
 
 	return err
 }
 
 // CopyFroRemoteFileInfos copies a file from the remote to a given writer and return a FileInfos struct
 // containing information about the file such as permissions, the file size, modification time and access time
+// Proxy allows Intercepting the IoReader as it is written for progress reporting or any other
+// stream modification/monitoring reason and can be set to nil to disable this behaviour.
 func (a *Client) CopyFromRemoteFileInfos(
 	ctx context.Context,
 	w io.Writer,
 	remotePath string,
 	passThru PassThru,
+	proxy ProxyInterface,
 ) (*FileInfos, error) {
-	return a.copyFromRemote(ctx, w, remotePath, passThru, true)
+	return a.copyFromRemote(ctx, w, remotePath, passThru, true, proxy)
 }
 
 func (a *Client) copyFromRemote(
@@ -363,6 +374,7 @@ func (a *Client) copyFromRemote(
 	remotePath string,
 	passThru PassThru,
 	preserveFileTimes bool,
+	proxy ProxyInterface,
 ) (*FileInfos, error) {
 	session, err := a.sshClient.NewSession()
 	if err != nil {
@@ -433,7 +445,13 @@ func (a *Client) copyFromRemote(
 			r = passThru(r, fileInfo.Size)
 		}
 
-		_, err = CopyN(w, r, fileInfo.Size)
+		if proxy == nil {
+			_, err = CopyN(w, r, fileInfo.Size)
+		} else {
+			proxy := proxy.GetIoReader(r)
+			_, err = CopyN(w, proxy, fileInfo.Size)
+		}
+
 		if err != nil {
 			errCh <- err
 			return

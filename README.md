@@ -2,6 +2,11 @@ Copy files over SCP with Go
 =============================
 [![Go Report Card](https://goreportcard.com/badge/bramvdbogaerde/go-scp)](https://goreportcard.com/report/bramvdbogaerde/go-scp) [![](https://godoc.org/github.com/bramvdbogaerde/go-scp?status.svg)](https://godoc.org/github.com/bramvdbogaerde/go-scp)
 
+This is a fork of Bram Vandenbogaerde's excellent go-scp module.
+It adds a proxy io.Reader and io.Writer that could very well replace the more limited PassThru Factory.
+The io.Reader proxy is added to the copyFromRemote, and intercepts the stream coming from the remote, providing a more accurate progress from what is downloaded (provided download is slower than writing to disk)
+The io.Writer proxy is added to the CopyPassThru, and intercepts the stream going to the remote, providing a more accurate progress from what is uploaded (provided upload is slower than reading to disk)  The proxies could easily be extended to also intercept the local reading/writing, rendering PassThru completely obsolete.  But since it wasn't a requirement of this fork, it was left undone.
+
 This package makes it very easy to copy files over scp in Go.
 It uses the golang.org/x/crypto/ssh package to establish a secure connection to a remote server in order to copy the files via the SCP protocol.
 
@@ -89,9 +94,15 @@ The usage is similar to the example at the top of this section, except that `Cop
 
 For a more comprehensive example, please consult the `TestDownloadFile` function in t he `tests/basic_test.go` file.
 
+### Using the Proxy reader or writer
+
+It is as simple as providing an io.ReadCloser or io.WriteCloser as the last parameter (can be nil when not using this functionality)
+
 ### License
 
 This library is licensed under the Mozilla Public License 2.0.    
 A copy of the license is provided in the `LICENSE.txt` file.
 
 Copyright (c) 2020 Bram Vandenbogaerde
+
+Fork by Jean-Pierre Doyon for Newtrax/Sandvik
